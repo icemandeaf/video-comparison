@@ -2,7 +2,6 @@ fastapi
 uvicorn[standard]
 requests
 pose-format
-pose-format-tools
-mediapipe
+mediapipe==0.10.21
 opencv-python-headless
 numpy<2.0
