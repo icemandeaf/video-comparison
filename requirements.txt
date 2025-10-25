@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+requests
+pose-format
+pose-format-tools
+mediapipe
+opencv-python-headless
+numpy<2.0
