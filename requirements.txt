@@ -4,3 +4,4 @@ requests
 pose-format==0.10.5
 numpy<2.0
 protobuf<5
+python-multipart==0.0.9
