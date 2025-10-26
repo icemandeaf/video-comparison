@@ -2,7 +2,5 @@ fastapi
 uvicorn[standard]
 requests
 pose-format==0.10.5
-mediapipe==0.10.21
-opencv-python-headless==4.9.0.80
 numpy<2.0
 protobuf<5
