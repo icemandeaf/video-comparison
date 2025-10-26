@@ -11,12 +11,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+
+# Python deps
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Optional: fail early if a wheel is missing required libs
-RUN python - <<'PY'\nimport cv2, mediapipe as mp, numpy as np, pose_format\nprint('Imports OK')\nPY
+# Optional: quick import check (no heredoc)
+RUN python -c "import cv2, mediapipe as mp, numpy as np, pose_format; print('Imports OK')"
 
+# App
 COPY server.py .
 
 # Render sets $PORT at runtime
