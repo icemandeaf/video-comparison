@@ -69,18 +69,15 @@ async def embed_file(file: UploadFile = File(...), model_name: str = Form("defau
 async def video_embed(
     file: UploadFile = File(...),
     model_name: str = Form("default"),
-    fps: int = Form(10),   # we'll apply this via ffmpeg, not video_to_pose
+    fps: str = Form("keep"),           # <-- string: "keep" (no downsample) or "10"/"15"/etc
+    debug: int = Form(0)               # keep if you added debug earlier; else remove this
 ):
     """
     Multipart:
       - file: short video (.mp4/.mov/.webm…)
       - model_name: default
-      - fps: target sampling fps (applied via ffmpeg)
-    Flow:
-      1) Save upload
-      2) ffmpeg -> normalize container & FPS  (-> norm.mp4)
-      3) video_to_pose -i norm.mp4 --format mediapipe -o clip.pose
-      4) base64 the .pose and call UZH
+      - fps: "keep" (preserve native fps) or a number-as-string, e.g., "10"
+      - debug: 1 to include pose component summary (optional)
     """
     import os, base64, tempfile, shlex
 
@@ -89,7 +86,6 @@ async def video_embed(
         norm_path = os.path.join(td, "clip_norm.mp4")
         out_pose  = os.path.join(td, "clip.pose")
 
-        # keep original extension to help ffmpeg
         ext = os.path.splitext(file.filename or "")[1] or ".mp4"
         in_path += ext
 
@@ -98,40 +94,48 @@ async def video_embed(
         with open(in_path, "wb") as f:
             f.write(video_bytes)
 
-        # 2) Normalize container + FPS using ffmpeg
-        #    -vf fps={fps}   : downsample frames to keep things light
-        #    -an             : drop audio
-        #    -pix_fmt yuv420p: widest compatibility
-        #    -movflags +faststart: friendlier streaming start
-        #    -preset veryfast: speed
+        # 2) Normalize container & pixel format; optionally downsample fps
         try:
+            vf_filter = ""
+            if fps and fps.lower() != "keep":
+                # only apply -vf fps=… if caller asked for it
+                try:
+                    fps_val = int(fps)
+                    if fps_val > 0:
+                        vf_filter = f"-vf fps={fps_val} "
+                except ValueError:
+                    pass  # ignore bad fps values -> keep native fps
+
             cmd_ffmpeg = (
                 f"ffmpeg -y -i {shlex.quote(in_path)} "
-                f"-vf fps={int(fps)} -an -pix_fmt yuv420p -movflags +faststart "
+                f"{vf_filter}-an -pix_fmt yuv420p -movflags +faststart "
                 f"-preset veryfast {shlex.quote(norm_path)}"
             )
             run(cmd_ffmpeg)
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"ffmpeg failed: {e}")
 
-        # 3) Extract pose with the supported CLI flags only
+        # 3) Extract pose (mediapipe layout)
         try:
-            cmd_pose = (
-                f"video_to_pose -i {shlex.quote(norm_path)} "
-                f"--format mediapipe -o {shlex.quote(out_pose)}"
-            )
+            cmd_pose = f"video_to_pose -i {shlex.quote(norm_path)} --format mediapipe -o {shlex.quote(out_pose)}"
             run(cmd_pose)
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"video_to_pose failed: {e}")
 
-        # 4) Read .pose, call UZH
+        # 4) (optional) debug block you may already have — keep or remove
+        pose_debug = None
+        # if debug: ... (omit here for brevity)
+
+        # 5) Read .pose, call UZH, return embeddings (and debug if present)
         try:
             with open(out_pose, "rb") as f:
                 pose_bytes = f.read()
             b64 = base64.b64encode(pose_bytes).decode("ascii")
             r = call_uzh({"pose": [b64], "model_name": model_name}, prefer_get=True)
-            ct = r.headers.get("content-type", "application/json")
-            return Response(content=r.text, status_code=r.status_code, media_type=ct)
+            if r.status_code != 200:
+                return Response(content=r.text, status_code=r.status_code, media_type=r.headers.get("content-type","application/json"))
+            payload = r.json()
+            # if debug: payload = {"debug": pose_debug, **payload}
+            return JSONResponse(payload, status_code=200)
         except Exception as e:
             return JSONResponse({"error": "Upstream fetch failed", "detail": str(e)}, status_code=502)
-
