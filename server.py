@@ -69,27 +69,62 @@ async def embed_file(file: UploadFile = File(...), model_name: str = Form("defau
 async def video_embed(
     file: UploadFile = File(...),
     model_name: str = Form("default"),
-    fps: int = Form(10),
-    holistic_complexity: int = Form(1)
+    fps: int = Form(10),   # we'll apply this via ffmpeg, not video_to_pose
 ):
-    # Save video
+    """
+    Multipart:
+      - file: short video (.mp4/.mov/.webm…)
+      - model_name: default
+      - fps: target sampling fps (applied via ffmpeg)
+    Flow:
+      1) Save upload
+      2) ffmpeg -> normalize container & FPS  (-> norm.mp4)
+      3) video_to_pose -i norm.mp4 --format mediapipe -o clip.pose
+      4) base64 the .pose and call UZH
+    """
+    import os, base64, tempfile, shlex
+
     with tempfile.TemporaryDirectory() as td:
-        in_path  = os.path.join(td, "clip")
-        out_pose = os.path.join(td, "clip.pose")
+        in_path   = os.path.join(td, "clip_in")
+        norm_path = os.path.join(td, "clip_norm.mp4")
+        out_pose  = os.path.join(td, "clip.pose")
+
+        # keep original extension to help ffmpeg
         ext = os.path.splitext(file.filename or "")[1] or ".mp4"
         in_path += ext
+
+        # 1) Save upload
         video_bytes = await file.read()
         with open(in_path, "wb") as f:
             f.write(video_bytes)
 
-        # Convert video -> .pose (MediaPipe layout)
+        # 2) Normalize container + FPS using ffmpeg
+        #    -vf fps={fps}   : downsample frames to keep things light
+        #    -an             : drop audio
+        #    -pix_fmt yuv420p: widest compatibility
+        #    -movflags +faststart: friendlier streaming start
+        #    -preset veryfast: speed
         try:
-            cmd = f"video_to_pose -i {shlex.quote(in_path)} --format mediapipe -o {shlex.quote(out_pose)} --fps {fps} --model_complexity {holistic_complexity}"
-            run(cmd)
+            cmd_ffmpeg = (
+                f"ffmpeg -y -i {shlex.quote(in_path)} "
+                f"-vf fps={int(fps)} -an -pix_fmt yuv420p -movflags +faststart "
+                f"-preset veryfast {shlex.quote(norm_path)}"
+            )
+            run(cmd_ffmpeg)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"ffmpeg failed: {e}")
+
+        # 3) Extract pose with the supported CLI flags only
+        try:
+            cmd_pose = (
+                f"video_to_pose -i {shlex.quote(norm_path)} "
+                f"--format mediapipe -o {shlex.quote(out_pose)}"
+            )
+            run(cmd_pose)
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"video_to_pose failed: {e}")
 
-        # Read .pose & call UZH
+        # 4) Read .pose, call UZH
         try:
             with open(out_pose, "rb") as f:
                 pose_bytes = f.read()
@@ -99,3 +134,4 @@ async def video_embed(
             return Response(content=r.text, status_code=r.status_code, media_type=ct)
         except Exception as e:
             return JSONResponse({"error": "Upstream fetch failed", "detail": str(e)}, status_code=502)
+
